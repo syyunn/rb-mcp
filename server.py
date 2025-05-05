@@ -764,6 +764,155 @@ def portfolio_review() -> str:
     Would you like a complete overview, or should we focus on a specific aspect of your portfolio?
     """
 
+# ----- Additional Trading Tools -----
+
+class TickerRequest(BaseModel):
+    """Model for requesting data for a specific ticker"""
+    ticker: str = Field(..., description="Stock ticker symbol (e.g., 'AAPL')")
+
+@mcp.tool()
+async def get_limit_orders_by_ticker(request: TickerRequest) -> Dict[str, Any]:
+    """
+    Get all open limit orders (both buy and sell) for a specific ticker.
+    
+    Returns a detailed list of all pending limit orders for the requested ticker,
+    including order type, quantity, limit price, order ID, and creation date.
+    
+    The results are sorted by order type (buys first, then sells) and then by price
+    (highest to lowest for sells, lowest to highest for buys).
+    """
+    try:
+        ticker = request.ticker.upper()
+        all_open_orders = rh.orders.get_all_open_stock_orders()
+        
+        # Filter orders for the specified ticker
+        ticker_orders = []
+        for order in all_open_orders:
+            # Get the ticker from the instrument URL
+            instrument_data = rh.stocks.get_instrument_by_url(order.get("instrument", ""))
+            order_ticker = instrument_data.get("symbol", "UNKNOWN")
+            
+            if order_ticker == ticker:
+                # Format the order data
+                formatted_order = {
+                    "order_id": order.get("id", ""),
+                    "side": order.get("side", ""),
+                    "quantity": float(order.get("quantity", 0)),
+                    "type": order.get("type", ""),
+                    "limit_price": float(order.get("price", 0)) if order.get("price") else None,
+                    "time_in_force": order.get("time_in_force", ""),
+                    "created_at": order.get("created_at", ""),
+                    "state": order.get("state", ""),
+                }
+                
+                # Convert created_at time from UTC to Eastern Time
+                if "created_at" in order and order["created_at"]:
+                    # Parse the ISO timestamp
+                    utc_time = order["created_at"].replace('Z', '+00:00')
+                    # Calculate ET (UTC-4 during daylight saving time)
+                    formatted_order["created_at_et"] = f"{utc_time[0:19]}Z (ET: {utc_time[11:16]} ET)"
+                
+                ticker_orders.append(formatted_order)
+        
+        # Separate buy and sell orders
+        buy_orders = [order for order in ticker_orders if order["side"] == "buy"]
+        sell_orders = [order for order in ticker_orders if order["side"] == "sell"]
+        
+        # Sort buy orders by price (lowest to highest)
+        buy_orders.sort(key=lambda x: x.get("limit_price", 0))
+        
+        # Sort sell orders by price (highest to lowest)
+        sell_orders.sort(key=lambda x: x.get("limit_price", 0), reverse=True)
+        
+        # Combine sorted orders with buys first, then sells
+        sorted_orders = buy_orders + sell_orders
+        
+        return {
+            "status": "success",
+            "ticker": ticker,
+            "total_orders": len(sorted_orders),
+            "buy_orders_count": len(buy_orders),
+            "sell_orders_count": len(sell_orders),
+            "orders": sorted_orders
+        }
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to get limit orders for {ticker}: {str(e)}"}
+
+@mcp.tool()
+async def get_all_limit_orders() -> Dict[str, Any]:
+    """
+    Get all open limit orders across all tickers.
+    
+    Returns a summary of all pending limit orders organized by ticker,
+    including counts of buy vs sell orders and total order value for each ticker.
+    """
+    try:
+        all_open_orders = rh.orders.get_all_open_stock_orders()
+        
+        # Group orders by ticker
+        ticker_groups = {}
+        
+        for order in all_open_orders:
+            # Skip non-limit orders
+            if order.get("type") != "limit":
+                continue
+                
+            # Get the ticker from the instrument URL
+            instrument_data = rh.stocks.get_instrument_by_url(order.get("instrument", ""))
+            ticker = instrument_data.get("symbol", "UNKNOWN")
+            
+            # Initialize ticker group if needed
+            if ticker not in ticker_groups:
+                ticker_groups[ticker] = {
+                    "buy_orders": [],
+                    "sell_orders": [],
+                }
+            
+            # Extract relevant order data
+            order_data = {
+                "order_id": order.get("id", ""),
+                "quantity": float(order.get("quantity", 0)),
+                "limit_price": float(order.get("price", 0)) if order.get("price") else 0,
+                "created_at": order.get("created_at", ""),
+            }
+            
+            # Add to appropriate list based on side
+            if order.get("side") == "buy":
+                ticker_groups[ticker]["buy_orders"].append(order_data)
+            else:
+                ticker_groups[ticker]["sell_orders"].append(order_data)
+        
+        # Format results for each ticker
+        ticker_summaries = []
+        for ticker, data in ticker_groups.items():
+            buy_orders = data["buy_orders"]
+            sell_orders = data["sell_orders"]
+            
+            # Calculate total values
+            total_buy_value = sum(order["limit_price"] * order["quantity"] for order in buy_orders)
+            total_sell_value = sum(order["limit_price"] * order["quantity"] for order in sell_orders)
+            
+            ticker_summaries.append({
+                "ticker": ticker,
+                "buy_orders_count": len(buy_orders),
+                "sell_orders_count": len(sell_orders),
+                "total_orders": len(buy_orders) + len(sell_orders),
+                "total_buy_value": round(total_buy_value, 2),
+                "total_sell_value": round(total_sell_value, 2),
+            })
+        
+        # Sort by total orders (highest first)
+        ticker_summaries.sort(key=lambda x: x["total_orders"], reverse=True)
+        
+        return {
+            "status": "success",
+            "total_tickers": len(ticker_summaries),
+            "total_limit_orders": sum(summary["total_orders"] for summary in ticker_summaries),
+            "ticker_summaries": ticker_summaries
+        }
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to get limit orders: {str(e)}"}
+
 # Run the server when executed directly
 if __name__ == "__main__":
     mcp.run()
